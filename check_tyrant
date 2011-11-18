@@ -94,6 +94,9 @@ if ( exists( $stats{mhost} ) ) {
         Time::HiRes::sleep(0.5);
         $waited_so_far += 0.5;
     }
+    
+    # cleanup after ourselves by removing the key we used to test
+    $master->out($replication_key); 
 
     if ( $replication_okay ) {
         $np->add_message( OK, "Tyrant is replicating in under ${waited_so_far}s" );
