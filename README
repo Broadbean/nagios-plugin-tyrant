@@ -1,0 +1,9 @@
+Very basic nagios plugin for a Tokyo Tyrant RDB database (http://fallabs.com/tokyotyrant/)
+
+Requires Nagios::Plugin & Time::HiRes from CPAN and TokyoTyrant perl module from http://fallabs.com/tokyotyrant/perlpkg/
+
+Checks the following:
+ * tyrant is available & you can read/write to it
+ * if tyrant is a slave it will check that replication is working
+ * optionally warn if there are too many records in tyrant
+ * optionally warn if the server load average goes above a number of your choice
