@@ -1,0 +1,127 @@
+#!/usr/bin/perl
+
+use strict;
+
+use TokyoTyrant;
+use Time::HiRes;
+use Nagios::Plugin; # imports OK, WARNING, CRITICAL and UNKNOWN
+
+my $np = Nagios::Plugin->new(
+    usage => 'Usage: %s -H <host> -p <port>',
+);
+
+# Nagios::Plugin docs say this is predefined for you
+# the source code says otherwise
+$np->add_arg(
+    spec     => 'host|hostname|H=s',
+    help     => '-H, --hostname=ADDRESS - host name or IP address that tyrant is running on',
+    required => 1,
+);
+
+$np->add_arg(
+    spec     => 'port|p=s',
+    help     => '-p, --port=INTEGER - the port that tyrant is running on',
+    required => 1,
+);
+
+$np->add_arg(
+    spec => 'max_records|maxrecords=s',
+    help => '--maxrecords=INTEGER - the max number of records allowed in Tyrant before warning',
+    required => 0,
+);
+
+$np->add_arg(
+    spec => 'max_load_avg|max_loadavg|maxloadavg=s',
+    help => '--maxloadavg=INTEGER - warn if the load avg is above this',
+    required => 0,
+);
+
+$np->getopts();
+
+my $server_ip = $np->opts->host
+    or $np->nagios_exit( UNKNOWN, "What tyrant server should we check? use the --host option" );
+my $port      = $np->opts->port
+    or $np->nagios_exit( UNKNOWN, "What port is tryant running on? use the --port option" );
+
+my $tt = TokyoTyrant::RDB->new();
+$tt->open( $server_ip, $port )
+    or $np->nagios_exit( CRITICAL, "Unable to connect to $server_ip:$port: " . $tt->errmsg());
+
+my $now = time();
+$tt->put('nagios_check' => $now )
+    or $np->nagios_exit( CRITICAL, "Unable to write to $server_ip:$port: " . $tt->errmsg());
+
+my $check = $tt->get('nagios_check')
+    or $np->nagios_exit( CRITICAL, "Unable to write to $server_ip:$port: " . $tt->errmsg());
+if ( $check != $now ) {
+    $np->nagios_exit( CRITICAL, "Unable to read and write to $server_ip:$port: stored time was '$now', retrieved '$check' - they should match!");
+}
+
+$np->add_message(OK, "Tyrant is up");
+
+my %stats = get_tyrant_stats( $tt );
+
+# Check if the Tyrant server is part of a replicated tyrant pair
+# and if it is check that replication is working
+if ( exists( $stats{mhost} ) ) {
+    # This server is using replication
+    # Test replication is working
+    my $master = TokyoTyrant::RDB->new();
+    $master->open( $stats{mhost}, $stats{mport} )
+        or $np->nagios_exit( UNKNOWN, "Unable to connect to Tyrant master $stats{mhost}:$stats{mport}: " . $master->errmsg() );
+
+    # Master is alive
+    # Put something on the master and make sure we can read it from the slave
+    my $replication_key = 'nagios_' . $$ . time();
+    $tt->out($replication_key); # make sure the key we are testing does not appear on the slave
+
+    # put something on the master
+    $master->put($replication_key => $now);
+
+    my $timeout = $np->opts->timeout();
+    my $waited_so_far = 0;
+
+    my $replication_okay = 0;
+
+    CHECK:
+    while ( $waited_so_far < $timeout ) {
+        my $check = $tt->get($replication_key);
+        if ( $check ) {
+            $replication_okay++;
+            last CHECK;
+        }
+
+        Time::HiRes::sleep(0.5);
+        $waited_so_far += 0.5;
+    }
+
+    if ( $replication_okay ) {
+        $np->add_message( OK, "Tyrant is replicating in under ${waited_so_far}s" );
+    }
+    else {
+        $np->add_message( WARNING, "Tyrant is up but the replication is very slow" );
+    }
+}
+
+my $max_records = $np->opts->max_records();
+if ( $max_records && $stats{rnum} >= $max_records ) {
+    $np->add_message( WARNING, "Tyrant has more than $max_records records, consider splitting the database" );
+}
+
+my $max_load_avg = $np->opts->max_load_avg();
+if ( $max_load_avg && $stats{loadavg} >= $max_load_avg ) {
+    $np->add_message( WARNING, "Tyrant load seems high. It is $stats{loadavg}, we expect it to be less than $max_load_avg" );
+}
+
+$np->nagios_exit( $np->check_messages() );
+
+sub get_tyrant_stats {
+    my $tt = shift;
+    my $raw_stats = $tt->stat(); # raw TSV from DB containing status
+    my %stats;
+    foreach my $line ( split /\n/, $raw_stats ) {
+        my ($heading, $value) = split( /\t/, $line, 2 );
+        $stats{$heading} = $value;
+    }
+    return %stats;
+}
